@@ -1,6 +1,8 @@
 import os
 import traceback
 import requests
+from datetime import datetime, timezone
+import pymysql
 from dotenv import load_dotenv, set_key
 from fastapi import APIRouter,HTTPException, status
 from fastapi.responses import JSONResponse
@@ -10,6 +12,10 @@ router = APIRouter()
 
 load_dotenv()
 
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_NAME = os.getenv("DB_NAME")
+DB_HOST = os.getenv("DB_HOST")
 BASE_URL = os.getenv("BASE_URL")
 ZING_ACCESS_TOKEN = os.getenv("ZING_ACCESS_TOKEN")
 ZING_INSTAGRAM_ACCOUNT_ID = os.getenv("ZING_INSTAGRAM_ACCOUNT_ID")
@@ -23,7 +29,36 @@ def fetch_insights_zing():
     Fetch a summarized version of Instagram insights, showing only important metrics.
     Automatically refreshes access token if needed.
     """
+    connection = None
     try:
+        # Establish MySQL connection
+        connection = pymysql.connect(
+            user=DB_USER,
+            password=DB_PASSWORD,
+            host=DB_HOST,
+            database=DB_NAME,
+        )
+
+        def ensure_table_exists():
+            """
+            Ensures the table 'socialmedia' exists in the database.
+            Creates the table if it doesn't exist.
+            """
+            with connection.cursor() as cursor:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS zing.socialmedia (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    username VARCHAR(255),
+                    followers INT,
+                    impressions INT,
+                    reach INT,
+                    accounts_engaged INT,
+                    website_clicks INT,
+                    created_ts DATETIME
+                );
+                """)
+                connection.commit()
+
         global ZING_ACCESS_TOKEN
         # Refresh the short-lived token
         if is_access_token_expired(ZING_ACCESS_TOKEN):
@@ -100,6 +135,32 @@ def fetch_insights_zing():
             "website_clicks" : website_clicks
         }
 
+        # Ensure the table exists
+        ensure_table_exists()
+
+        # Begin database transaction
+        with connection.cursor() as cursor:
+            try:
+                cursor.execute("""
+                    INSERT INTO zing.socialmedia (username, followers, impressions, reach, accounts_engaged, website_clicks, created_ts)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s);
+                """, (
+                    result["username"],
+                    result["followers_count"],
+                    result["impressions"],
+                    result["reach"],
+                    result["accounts_engaged"],
+                    result["website_clicks"],
+                    datetime.now(timezone.utc)
+                ))
+                connection.commit()  # Commit changes if everything is fine
+            except Exception as e:
+                connection.rollback()  # Rollback if an error occurs
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to insert data into database: {str(e)}"
+                )
+
         return JSONResponse(content=result)
 
     except HTTPException as e:
@@ -108,3 +169,6 @@ def fetch_insights_zing():
     except Exception:
         traceback.print_exc()
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
+    finally:
+        if connection:
+            connection.close()
