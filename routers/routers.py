@@ -248,6 +248,19 @@ def fetch_top_posts():
 
             if not media_url:
                 continue
+
+            # Fetch likes
+            likes_url = f"{BASE_URL}{post_id}?fields=like_count&access_token={ZING_ACCESS_TOKEN}"
+            likes_response = requests.get(likes_url)
+
+            if likes_response.status_code != 200:
+                raise HTTPException(
+                    status_code=likes_response.status_code,
+                    detail=f"Failed to fetch likes: {likes_response.text}"
+                )
+            like_metrics = likes_response.json()
+            like_count = like_metrics.get("like_count", 0)
+
             # Fetch insights for posts and reels
             insights_url = f"{BASE_URL}{post_id}/insights?metric=reach&access_token={ZING_ACCESS_TOKEN}"
             insights_response = requests.get(insights_url)
@@ -258,18 +271,36 @@ def fetch_top_posts():
                     detail=f"Failed to fetch insights: {insights_response.text}"
                 )
             post_insights = insights_response.json()
+
+            saves_url = f"{BASE_URL}{post_id}/insights?metric=saved&access_token={ZING_ACCESS_TOKEN}"
+            saves_response = requests.get(saves_url)
+
+            if saves_response.status_code != 200:
+                raise HTTPException(
+                    status_code=saves_response.status_code,
+                    detail=f"Failed to fetch saves: {saves_response.text}"
+                )
+            save_insights = saves_response.json()
+
             reach = None
             for insight in post_insights.get("data", []):
                 if insight.get("name") == "reach":
                     reach = insight.get("values", [{}])[0].get("value")
                     break
-            if reach:
+            
+            saves = None
+            for insight in save_insights.get("data", []):
+                if insight.get("name") == "saved":
+                    saves = insight.get("values", [{}])[0].get("value")
+            if reach or like_count or saves:
                 top_posts.append({
                     "post_id": post_id,
                     "media_type": media_type,
                     "media_url": media_url,
                     "post_created": post_created,  # Already formatted
-                    "reach": reach
+                    "reach": reach,
+                    "likes":like_count,
+                    "saves": saves
                 })
 
         # Sort posts by reach in descending order and take the top 5
