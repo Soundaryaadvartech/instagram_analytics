@@ -1,7 +1,7 @@
 import os
 import traceback
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import pymysql
 from dotenv import load_dotenv, set_key
 from fastapi import APIRouter,HTTPException, status
@@ -172,3 +172,110 @@ def fetch_insights_zing():
     finally:
         if connection:
             connection.close()
+
+@router.get("/fetch_top_posts")
+def fetch_top_posts():
+    try:
+        global ZING_ACCESS_TOKEN
+        # Refresh the short-lived token
+        if is_access_token_expired(ZING_ACCESS_TOKEN):
+            try:
+                refreshed_token = refresh_access_token(APP_ID, APP_SECRET, LONG_LIVED_TOKEN)
+                set_key('.env', 'ZING_ACCESS_TOKEN', refreshed_token)
+                load_dotenv()  # Reload the updated .env file
+                ZING_ACCESS_TOKEN = os.getenv("ZING_ACCESS_TOKEN")  # Get updated token
+            except Exception as e:
+                try:
+                    new_long_lived_token = generate_new_long_lived_token()
+                    set_key('.env', 'LONG_LIVED_TOKEN', new_long_lived_token)
+                    load_dotenv()  # Reload the updated .env file
+                    new_zing_access_token = refresh_access_token(APP_ID, APP_SECRET, new_long_lived_token)
+                    set_key('.env', 'ZING_ACCESS_TOKEN', new_zing_access_token)
+                    load_dotenv()  # Reload the updated .env file
+                    ZING_ACCESS_TOKEN = os.getenv("ZING_ACCESS_TOKEN")
+                except Exception as gen_error:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to generate new long-lived token: {str(gen_error)}"
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to refresh access token: {str(e)}"
+                )
+         # Calculate the date one month ago
+        one_month_ago = datetime.now(timezone.utc) - timedelta(days=30)
+
+        # Fetch top-performing posts and reels
+        posts_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/media?fields=id,media_type,media_url,timestamp&access_token={ZING_ACCESS_TOKEN}"
+        posts_response = requests.get(posts_url)
+
+        if posts_response.status_code != 200:
+            raise HTTPException(
+                status_code=posts_response.status_code,
+                detail=f"Failed to fetch posts: {posts_response.text}"
+            )
+        posts_data = posts_response.json()
+
+        # Filter posts from the last month
+        recent_posts = [
+            {
+                "post_id": post.get("id"),
+                "media_type": post.get("media_type"),
+                "media_url": post.get("media_url"),
+                "timestamp": post.get("timestamp")
+            }
+            for post in posts_data.get("data", [])
+            if datetime.fromisoformat(post.get("timestamp").replace("Z", "+00:00")) >= one_month_ago
+        ]
+
+        # Count the number of recent posts
+        total_recent_posts = len(recent_posts)
+
+        # Extract top-performing posts and reels
+        top_posts = []
+        for post in posts_data.get("data", []):
+            post_id = post.get("id")
+            media_type = post.get("media_type")
+            media_url = post.get("media_url")
+            post_created = post.get("timestamp")
+
+            if not media_url:
+                continue
+             # Fetch insights for posts and reels
+            insights_url = f"{BASE_URL}{post_id}/insights?metric=reach&access_token={ZING_ACCESS_TOKEN}"
+            insights_response = requests.get(insights_url)
+
+            if insights_response.status_code != 200:
+                raise HTTPException(
+                    status_code=insights_response.status_code,
+                    detail=f"Failed to fetch insights: {insights_response.text}"
+                )
+            post_insights = insights_response.json()            
+            if post_insights:
+                reach = None
+            for insight in post_insights.get("data", []):
+                if insight.get("name") == "reach":
+                    reach = insight.get("values", [{}])[0].get("value")
+                    break
+            if reach:
+                top_posts.append({
+                    "post_id": post_id,
+                    "media_type": media_type,
+                    "media_url": media_url,
+                    "post_created" : post_created,
+                    "reach": reach
+                })
+
+           # Sort posts by reach in descending order and take the top 5
+        top_posts = sorted(top_posts, key=lambda x: x["reach"], reverse=True)[:5] 
+        result = {
+            "total_recent_posts": total_recent_posts,
+            "top_posts": top_posts}
+        return JSONResponse(content=result)
+
+    except HTTPException as e:
+        traceback.print_exc()
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except Exception:
+        traceback.print_exc()
+        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})

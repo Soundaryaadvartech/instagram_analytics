@@ -38,8 +38,21 @@ def is_access_token_expired(access_token: str) -> bool:
     """
     test_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}?fields=id&access_token={ZING_ACCESS_TOKEN}"
     response = requests.get(test_url)
-    if response.status_code == 401:  # Unauthorized (token expired)
+   # Check for 401 Unauthorized (token expired)
+    if response.status_code == 401:
         return True
+    
+    # Check for 400 Bad Request with expired token message
+    if response.status_code == 400:
+        try:
+            error_data = response.json()
+            error_message = error_data.get("error", {}).get("message", "")
+            # If the error message indicates token expiration
+            if "expired" in error_message.lower():
+                return True
+        except ValueError:
+            pass  # In case response is not in JSON format or doesn't contain error info
+    
     return False
 
 def generate_new_long_lived_token() -> str:
