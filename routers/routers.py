@@ -202,7 +202,8 @@ def fetch_top_posts():
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Failed to refresh access token: {str(e)}"
                 )
-         # Calculate the date one month ago
+
+        # Calculate the date one month ago
         one_month_ago = datetime.now(timezone.utc) - timedelta(days=30)
 
         # Fetch top-performing posts and reels
@@ -217,31 +218,37 @@ def fetch_top_posts():
         posts_data = posts_response.json()
 
         # Filter posts from the last month
-        recent_posts = [
-            {
-                "post_id": post.get("id"),
-                "media_type": post.get("media_type"),
-                "media_url": post.get("media_url"),
-                "timestamp": post.get("timestamp")
-            }
-            for post in posts_data.get("data", [])
-            if datetime.fromisoformat(post.get("timestamp").replace("Z", "+00:00")) >= one_month_ago
-        ]
+        recent_posts = []
+        for post in posts_data.get("data", []):
+            # Convert timestamp to proper UTC format
+            raw_timestamp = post.get("timestamp")
+            if raw_timestamp:
+                utc_time = datetime.strptime(raw_timestamp, "%Y-%m-%dT%H:%M:%S%z")
+                formatted_utc_time = utc_time.strftime("%Y-%m-%d %H:%M:%S")
+                
+                # Add to recent posts if within the last month
+                if utc_time >= one_month_ago:
+                    recent_posts.append({
+                        "post_id": post.get("id"),
+                        "media_type": post.get("media_type"),
+                        "media_url": post.get("media_url"),
+                        "timestamp": formatted_utc_time  # Store formatted timestamp
+                    })
 
         # Count the number of recent posts
         total_recent_posts = len(recent_posts)
 
         # Extract top-performing posts and reels
         top_posts = []
-        for post in posts_data.get("data", []):
-            post_id = post.get("id")
+        for post in recent_posts:
+            post_id = post.get("post_id")
             media_type = post.get("media_type")
             media_url = post.get("media_url")
             post_created = post.get("timestamp")
 
             if not media_url:
                 continue
-             # Fetch insights for posts and reels
+            # Fetch insights for posts and reels
             insights_url = f"{BASE_URL}{post_id}/insights?metric=reach&access_token={ZING_ACCESS_TOKEN}"
             insights_response = requests.get(insights_url)
 
@@ -250,9 +257,8 @@ def fetch_top_posts():
                     status_code=insights_response.status_code,
                     detail=f"Failed to fetch insights: {insights_response.text}"
                 )
-            post_insights = insights_response.json()            
-            if post_insights:
-                reach = None
+            post_insights = insights_response.json()
+            reach = None
             for insight in post_insights.get("data", []):
                 if insight.get("name") == "reach":
                     reach = insight.get("values", [{}])[0].get("value")
@@ -262,15 +268,16 @@ def fetch_top_posts():
                     "post_id": post_id,
                     "media_type": media_type,
                     "media_url": media_url,
-                    "post_created" : post_created,
+                    "post_created": post_created,  # Already formatted
                     "reach": reach
                 })
 
-           # Sort posts by reach in descending order and take the top 5
-        top_posts = sorted(top_posts, key=lambda x: x["reach"], reverse=True)[:5] 
+        # Sort posts by reach in descending order and take the top 5
+        top_posts = sorted(top_posts, key=lambda x: x["reach"], reverse=True)[:5]
         result = {
             "total_recent_posts": total_recent_posts,
-            "top_posts": top_posts}
+            "top_posts": top_posts
+        }
         return JSONResponse(content=result)
 
     except HTTPException as e:
