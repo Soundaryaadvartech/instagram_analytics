@@ -458,3 +458,115 @@ def fetch_today_posts():
     except Exception:
         traceback.print_exc()
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
+
+@router.get("/fetch_all_posts")
+def fetch_all_posts():
+    try:
+        # Initialize variables to store all posts
+        all_posts = []
+
+        # Paginate through all posts from the Instagram API
+        posts_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/media?fields=id,media_type,media_url,timestamp&access_token={ZING_ACCESS_TOKEN}"
+        while posts_url:
+            posts_response = requests.get(posts_url)
+
+            if posts_response.status_code != 200:
+                raise HTTPException(
+                    status_code=posts_response.status_code,
+                    detail=f"Failed to fetch posts: {posts_response.text}"
+                )
+
+            posts_data = posts_response.json()
+            all_posts.extend(posts_data.get("data", []))
+            # Check if there's a next page
+            posts_url = posts_data.get("paging", {}).get("next")
+
+        # If no posts found, return a message
+        if not all_posts:
+            return JSONResponse(content={"message": "No posts found."})
+
+        # Prepare the response by fetching metrics for each post
+        post_metrics = []
+        for post in all_posts:
+            post_id = post.get("id")
+            media_type = post.get("media_type")
+            media_url = post.get("media_url")
+            raw_timestamp = post.get("timestamp")
+
+            # Format timestamp
+            post_created = None
+            if raw_timestamp:
+                utc_time = datetime.strptime(raw_timestamp, "%Y-%m-%dT%H:%M:%S%z")
+                post_created = utc_time.strftime("%Y-%m-%d")
+
+            # Fetch likes
+            likes_url = f"{BASE_URL}{post_id}?fields=like_count&access_token={ZING_ACCESS_TOKEN}"
+            likes_response = requests.get(likes_url)
+
+            if likes_response.status_code != 200:
+                raise HTTPException(
+                    status_code=likes_response.status_code,
+                    detail=f"Failed to fetch likes: {likes_response.text}"
+                )
+            like_metrics = likes_response.json()
+            like_count = like_metrics.get("like_count", 0)
+
+            # Fetch insights for reach
+            insights_url = f"{BASE_URL}{post_id}/insights?metric=reach&access_token={ZING_ACCESS_TOKEN}"
+            insights_response = requests.get(insights_url)
+
+            if insights_response.status_code != 200:
+                raise HTTPException(
+                    status_code=insights_response.status_code,
+                    detail=f"Failed to fetch insights: {insights_response.text}"
+                )
+            post_insights = insights_response.json()
+
+            # Fetch saves
+            saves_url = f"{BASE_URL}{post_id}/insights?metric=saved&access_token={ZING_ACCESS_TOKEN}"
+            saves_response = requests.get(saves_url)
+
+            if saves_response.status_code != 200:
+                raise HTTPException(
+                    status_code=saves_response.status_code,
+                    detail=f"Failed to fetch saves: {saves_response.text}"
+                )
+            save_insights = saves_response.json()
+
+            # Extract reach and saves values
+            reach = None
+            for insight in post_insights.get("data", []):
+                if insight.get("name") == "reach":
+                    reach = insight.get("values", [{}])[0].get("value")
+                    break
+
+            saves = None
+            for insight in save_insights.get("data", []):
+                if insight.get("name") == "saved":
+                    saves = insight.get("values", [{}])[0].get("value")
+
+            # Add the post details to the metrics list
+            post_metrics.append({
+                "post_id": post_id,
+                "media_type": media_type,
+                "media_url": media_url,
+                "post_created": post_created,
+                "reach": reach,
+                "likes": like_count,
+                "saves": saves
+            })
+
+        # Prepare the final response
+        result = {
+            "total_posts": len(post_metrics),
+            "posts": post_metrics
+        }
+
+        return JSONResponse(content=result)
+
+    except HTTPException as e:
+        traceback.print_exc()
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except Exception:
+        traceback.print_exc()
+        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
