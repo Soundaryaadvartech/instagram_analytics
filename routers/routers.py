@@ -465,6 +465,38 @@ def fetch_all_posts():
         # Initialize variables to store all posts
         all_posts = []
 
+         # Connect to the database
+        connection = pymysql.connect(
+            host=DB_HOST,
+            user=DB_USER,
+            password=DB_PASSWORD,
+            database=DB_NAME
+        )
+
+        with connection.cursor() as cursor:
+            # Create `Posts` table if not exists
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS zing.posts (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    post_id VARCHAR(255) NOT NULL,
+                    media_type VARCHAR(50),
+                    media_url TEXT,
+                    post_created DATE
+                )
+            """)
+
+            # Create `PostInsights` table if not exists
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS zing.postinsights (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    posts_id INT NOT NULL,
+                    reach INT,
+                    likes INT,
+                    saves INT,
+                    FOREIGN KEY (posts_id) REFERENCES posts(id) ON DELETE CASCADE
+                )
+            """)
+
         # Paginate through all posts from the Instagram API
         posts_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/media?fields=id,media_type,media_url,timestamp&access_token={ZING_ACCESS_TOKEN}"
         while posts_url:
@@ -498,6 +530,13 @@ def fetch_all_posts():
             if raw_timestamp:
                 utc_time = datetime.strptime(raw_timestamp, "%Y-%m-%dT%H:%M:%S%z")
                 post_created = utc_time.strftime("%Y-%m-%d")
+
+            # Insert post details into `Posts` table
+            cursor.execute("""
+                INSERT INTO posts (post_id, media_type, media_url, post_created)
+                VALUES (%s, %s, %s, %s)
+            """, (post_id, media_type, media_url, post_created))
+            post_db_id = cursor.lastrowid
 
             # Fetch likes
             likes_url = f"{BASE_URL}{post_id}?fields=like_count&access_token={ZING_ACCESS_TOKEN}"
@@ -545,6 +584,11 @@ def fetch_all_posts():
                 if insight.get("name") == "saved":
                     saves = insight.get("values", [{}])[0].get("value")
 
+            # Insert insights into `PostInsights` table
+            cursor.execute("""
+                INSERT INTO zing.postinsights (posts_id, reach, likes, saves)
+                VALUES (%s, %s, %s, %s)
+            """, (post_db_id, reach, like_count, saves))
             # Add the post details to the metrics list
             post_metrics.append({
                 "post_id": post_id,
