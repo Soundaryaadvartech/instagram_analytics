@@ -146,6 +146,20 @@ def fetch_insights_zing(db: Session = Depends(get_db)):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to insert data into database"
             )
+        
+         # Write the result to a CSV file
+        try:
+            with open('instagram_insights.csv', mode='a', newline='') as file:
+                writer = csv.DictWriter(file, fieldnames=result.keys())
+                if file.tell() == 0:
+                    writer.writeheader()  # Write header only if file is empty
+                writer.writerow(result)
+        except Exception as e:
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to write to CSV: {str(e)}"
+            )
         return JSONResponse(content=result)
 
     except HTTPException as e:
@@ -187,12 +201,15 @@ def engaged_audience_demographics():
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=f"Failed to refresh access token: {str(e)}"
                 )
+        # Get timestamps for the last 24 hours
+        until_timestamp = int(datetime.now(timezone.utc).timestamp())
+        since_timestamp = until_timestamp - 86400  # 24 hours ago
             # Fetch engaged audience demographics
-        engaged_audience_age_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_month&metric_type=total_value&breakdown=age&access_token={ZING_ACCESS_TOKEN}"
+        engaged_audience_age_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_week&since={since_timestamp}&until={until_timestamp}&metric_type=total_value&breakdown=age&access_token={ZING_ACCESS_TOKEN}"
         engaged_audience_age_response = requests.get(engaged_audience_age_url)
-        engaged_audience_gender_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_month&metric_type=total_value&breakdown=gender&access_token={ZING_ACCESS_TOKEN}"
+        engaged_audience_gender_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_week&since={since_timestamp}&until={until_timestamp}&metric_type=total_value&breakdown=gender&access_token={ZING_ACCESS_TOKEN}"
         engaged_audience_gender_response = requests.get(engaged_audience_gender_url)
-        engaged_audience_city_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_month&metric_type=total_value&breakdown=city&access_token={ZING_ACCESS_TOKEN}"
+        engaged_audience_city_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_week&since={since_timestamp}&until={until_timestamp}&metric_type=total_value&breakdown=city&access_token={ZING_ACCESS_TOKEN}"
         engaged_audience_city_response = requests.get(engaged_audience_city_url)
 
         if engaged_audience_age_response.status_code != 200:
