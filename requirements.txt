@@ -4,3 +4,4 @@ requests==2.32.3
 pandas== 2.2.3
 python-dotenv==1.0.1
 pymysql==1.1.1
+sqlalchemy==2.0.37

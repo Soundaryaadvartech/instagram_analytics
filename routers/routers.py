@@ -1,12 +1,18 @@
 import os
+import csv
+from io import StringIO
 import traceback
-import requests
+import time
 from datetime import datetime, timezone, timedelta
+import requests
 import pymysql
+from sqlalchemy.orm import Session
 from dotenv import load_dotenv, set_key
-from fastapi import APIRouter,HTTPException, status
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter,HTTPException, status, Depends
+from fastapi.responses import JSONResponse, StreamingResponse
+from database.models import SocialMedia
 from utilities.access_token import refresh_access_token, is_access_token_expired, generate_new_long_lived_token
+from database.database import get_db
 
 router = APIRouter()
 
@@ -24,41 +30,12 @@ APP_SECRET = os.getenv("META_APP_SECRET")
 LONG_LIVED_TOKEN = os.getenv("LONG_LIVED_TOKEN")
 
 @router.get("/fetch_insights_zing")
-def fetch_insights_zing():
+def fetch_insights_zing(db: Session = Depends(get_db)):
     """
     Fetch a summarized version of Instagram insights, showing only important metrics.
     Automatically refreshes access token if needed.
     """
-    connection = None
     try:
-        # Establish MySQL connection
-        connection = pymysql.connect(
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            database=DB_NAME,
-        )
-
-        def ensure_table_exists():
-            """
-            Ensures the table 'socialmedia' exists in the database.
-            Creates the table if it doesn't exist.
-            """
-            with connection.cursor() as cursor:
-                cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS zing.socialmedia (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    username VARCHAR(255),
-                    followers INT,
-                    impressions INT,
-                    reach INT,
-                    accounts_engaged INT,
-                    website_clicks INT,
-                    created_ts DATETIME
-                );
-                """)
-                connection.commit()
-
         global ZING_ACCESS_TOKEN
         # Refresh the short-lived token
         if is_access_token_expired(ZING_ACCESS_TOKEN):
@@ -112,11 +89,11 @@ def fetch_insights_zing():
         insights_data = insights_response.json()
 
         # Extract insights
-        impressions, reach, accounts_engaged, period, website_clicks = None, None, None, None, None
+        impressions, reach, accounts_engaged, website_clicks = None, None, None, None
+
         for item in insights_data.get("data", []):
             if item.get("name") == "impressions" and "total_value" in item:
                 impressions = item["total_value"].get("value")
-                period = item.get("period")
             if item.get("name") == "reach" and "total_value" in item:
                 reach = item["total_value"].get("value")
             if item.get("name") == "accounts_engaged" and "total_value" in item:
@@ -128,39 +105,47 @@ def fetch_insights_zing():
         result = {
             "username": account_data.get("username"),
             "followers_count": account_data.get("followers_count"),
-            "period": period,
             "impressions": impressions,
             "reach": reach,
             "accounts_engaged": accounts_engaged,
             "website_clicks" : website_clicks
         }
-
-        # Ensure the table exists
-        ensure_table_exists()
-
-        # Begin database transaction
-        with connection.cursor() as cursor:
-            try:
-                cursor.execute("""
-                    INSERT INTO zing.socialmedia (username, followers, impressions, reach, accounts_engaged, website_clicks, created_ts)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s);
-                """, (
-                    result["username"],
-                    result["followers_count"],
-                    result["impressions"],
-                    result["reach"],
-                    result["accounts_engaged"],
-                    result["website_clicks"],
-                    datetime.now(timezone.utc)
-                ))
-                connection.commit()  # Commit changes if everything is fine
-            except Exception as e:
-                connection.rollback()  # Rollback if an error occurs
-                raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=f"Failed to insert data into database: {str(e)}"
-                )
-
+        # Retrieve the last inserted record
+        last_record = db.query(SocialMedia).order_by(SocialMedia.created_ts.desc()).first()
+        # Compute new values
+        if last_record:
+            new_followers = result["followers_count"] - (last_record.followers or 0)
+            new_impressions = result["impressions"] - (last_record.impressions or 0)
+            new_reach = result["reach"] - (last_record.reach or 0)
+            new_accounts_engaged = result["accounts_engaged"] - (last_record.accounts_engaged or 0)
+            new_website_clicks = result["website_clicks"] - (last_record.website_clicks or 0)
+        else:
+            new_followers = result["followers_count"]
+            new_impressions = result["impressions"]
+            new_reach = result["reach"]
+            new_accounts_engaged = result["accounts_engaged"]
+            new_website_clicks = result["website_clicks"]
+       # Store data in the database using SQLAlchemy
+        # Insert new record
+        try:
+            socialmedia_analytics = SocialMedia(
+                username=result["username"],
+                followers=new_followers,
+                impressions=new_impressions,
+                reach=new_reach,
+                accounts_engaged=new_accounts_engaged,
+                website_clicks=new_website_clicks,
+                created_ts=datetime.now(timezone.utc)
+            )
+            db.add(socialmedia_analytics)
+            db.commit()
+            db.refresh(socialmedia_analytics)
+        except Exception as e:
+            db.rollback()
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail="Failed to insert data into database"
+            )
         return JSONResponse(content=result)
 
     except HTTPException as e:
@@ -169,9 +154,153 @@ def fetch_insights_zing():
     except Exception:
         traceback.print_exc()
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
-    finally:
-        if connection:
-            connection.close()
+
+@router.get("/engaged_audience_demographics")
+def engaged_audience_demographics():
+    try:
+        global ZING_ACCESS_TOKEN
+        # Refresh the short-lived token
+        if is_access_token_expired(ZING_ACCESS_TOKEN):
+            try:
+                refreshed_token = refresh_access_token(APP_ID, APP_SECRET, LONG_LIVED_TOKEN)
+                # Update the .env file and reload the environment
+                set_key('.env', 'ZING_ACCESS_TOKEN', refreshed_token)
+                load_dotenv()  # Reload the updated .env file
+                ZING_ACCESS_TOKEN = os.getenv("ZING_ACCESS_TOKEN")  # Get updated token
+            except Exception as e:
+                try:
+                    new_long_lived_token = generate_new_long_lived_token()
+                    set_key('.env', 'LONG_LIVED_TOKEN', new_long_lived_token)
+                    load_dotenv()  # Reload the updated .env file
+                    # Now use the new long-lived token to generate a new short-lived (ZING) access token
+                    # Here we assume that generate_zing_access_token uses long-lived token to create the short-lived one
+                    new_zing_access_token = refresh_access_token(APP_ID,APP_SECRET,new_long_lived_token)
+                    set_key('.env', 'ZING_ACCESS_TOKEN', new_zing_access_token)
+                    load_dotenv()  # Reload the updated .env file
+                    ZING_ACCESS_TOKEN = os.getenv("ZING_ACCESS_TOKEN")
+                except Exception as gen_error:
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail=f"Failed to generate new long-lived token: {str(gen_error)}"
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to refresh access token: {str(e)}"
+                )
+            # Fetch engaged audience demographics
+        engaged_audience_age_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_month&metric_type=total_value&breakdown=age&access_token={ZING_ACCESS_TOKEN}"
+        engaged_audience_age_response = requests.get(engaged_audience_age_url)
+        engaged_audience_gender_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_month&metric_type=total_value&breakdown=gender&access_token={ZING_ACCESS_TOKEN}"
+        engaged_audience_gender_response = requests.get(engaged_audience_gender_url)
+        engaged_audience_city_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_month&metric_type=total_value&breakdown=city&access_token={ZING_ACCESS_TOKEN}"
+        engaged_audience_city_response = requests.get(engaged_audience_city_url)
+
+        if engaged_audience_age_response.status_code != 200:
+            raise HTTPException(
+                status_code=engaged_audience_age_response.status_code,
+                detail=f"Failed to fetch engaged audience age group: {engaged_audience_age_response.text}"
+            )
+        
+        if engaged_audience_gender_response.status_code != 200:
+            raise HTTPException(
+                status_code=engaged_audience_gender_response.status_code,
+                detail = f"Failed to fetch engaged audience gender distribution: {engaged_audience_gender_response.text}"
+            )
+        
+        if engaged_audience_city_response.status_code != 200:
+            raise HTTPException(
+                status_code=engaged_audience_city_response.status_code,
+                detail = f"Failed to fetch engaged audience city distribution: {engaged_audience_city_response.text}"
+            )
+
+        engaged_audience_age_data = engaged_audience_age_response.json()
+        engaged_audience_gender_data = engaged_audience_gender_response.json()
+        engaged_audience_city_data = engaged_audience_city_response.json()
+
+         # Initialize age_group to hold the processed values
+        age_group = []
+        # Loop through the demographics data to get the age breakdown
+        for item in engaged_audience_age_data.get("data", []):
+            if item.get("name") == "engaged_audience_demographics" and "total_value" in item:
+                breakdowns = item["total_value"].get("breakdowns", [])
+                
+                for breakdown in breakdowns:
+                    if "results" in breakdown:
+                        for result in breakdown["results"]:
+                            age_range = result.get("dimension_values", [])
+                            count = result.get("value")
+                            if age_range:
+                                # Append a dictionary with age range and count
+                                age_group.append({
+                                    "age_range": age_range[0],
+                                    "count": count
+                                })
+        gender_distribution = []
+        for item in engaged_audience_gender_data.get("data", []):
+            if item.get("name") == "engaged_audience_demographics" and "total_value" in item:
+                breakdowns = item["total_value"].get("breakdowns", [])
+
+                for breakdown in breakdowns:
+                    if "results" in breakdown:
+                        for result in breakdown["results"]:
+                            gender_dist = result.get("dimension_values", [])
+                            count_gd = result.get("value")
+                            if gender_dist:
+                                gender_distribution.append({
+                                    "gender": gender_dist[0],
+                                    "count": count_gd
+                                })
+        city_distribution = []
+        for item in engaged_audience_city_data.get("data", []):
+            if item.get("name") == "engaged_audience_demographics" and "total_value" in item:
+                breakdowns = item["total_value"].get("breakdowns", [])
+
+                for breakdown in breakdowns:
+                    if "results" in breakdown:
+                        for result in breakdown["results"]:
+                            city_dist = result.get("dimension_values", [])
+                            count_cd = result.get("value")
+                            if city_dist:
+                                city_distribution.append(
+                                    {
+                                        "city": city_dist[0],
+                                        "count": count_cd
+                                    }
+                                )
+        result = {
+            "age_group": age_group,
+            "gender_distribution": gender_distribution,
+            "city_distribution": city_distribution
+        }
+
+        # Prepare data for CSV
+        output = StringIO()
+        csv_writer = csv.DictWriter(output, fieldnames=["age_range", "count", "gender", "gender_count", "city", "city_count"])
+        csv_writer.writeheader()
+
+        # Combine all three groups into one list to write to CSV
+        max_length = max(len(age_group), len(gender_distribution), len(city_distribution))
+        for i in range(max_length):
+            row = {
+                "age_range": age_group[i]["age_range"] if i < len(age_group) else "",
+                "count": age_group[i]["count"] if i < len(age_group) else "",
+                "gender": gender_distribution[i]["gender"] if i < len(gender_distribution) else "",
+                "gender_count": gender_distribution[i]["count"] if i < len(gender_distribution) else "",
+                "city": city_distribution[i]["city"] if i < len(city_distribution) else "",
+                "city_count": city_distribution[i]["count"] if i < len(city_distribution) else ""
+            }
+            csv_writer.writerow(row)
+
+        output.seek(0)
+        return StreamingResponse(output, media_type="text/csv", headers={"Content-Disposition": "attachment; filename=engaged_audience_demographics.csv"})
+
+    except HTTPException as e:
+        traceback.print_exc()
+        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+    except Exception:
+        traceback.print_exc()
+        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
+
 
 @router.get("/fetch_top_posts")
 def fetch_top_posts():
@@ -459,158 +588,125 @@ def fetch_today_posts():
         traceback.print_exc()
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
 
-@router.get("/fetch_all_posts")
-def fetch_all_posts():
-    try:
-        # Initialize variables to store all posts
-        all_posts = []
+# @router.get("/fetch_all_posts")
+# def fetch_all_posts(db: Session = Depends(get_db)):
+#     try:
+#         # Initialize variables to store all posts
+#         all_posts = []
+        
+#         # Paginate through all posts from the Instagram API
+#         posts_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/media?fields=id,media_type,media_url,timestamp&access_token={ZING_ACCESS_TOKEN}"
+#         while posts_url:
+#             posts_response = requests.get(posts_url)
 
-         # Connect to the database
-        connection = pymysql.connect(
-            host=DB_HOST,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME
-        )
+#             if posts_response.status_code != 200:
+#                 raise HTTPException(
+#                     status_code=posts_response.status_code,
+#                     detail=f"Failed to fetch posts: {posts_response.text}"
+#                 )
 
-        with connection.cursor() as cursor:
-            # Create `Posts` table if not exists
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS zing.posts (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    post_id VARCHAR(255) NOT NULL,
-                    media_type VARCHAR(50),
-                    media_url TEXT,
-                    post_created DATE
-                )
-            """)
+#             posts_data = posts_response.json()
+#             all_posts.extend(posts_data.get("data", []))
+#             # Check if there's a next page
+#             posts_url = posts_data.get("paging", {}).get("next")
 
-            # Create `PostInsights` table if not exists
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS zing.postinsights (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    posts_id INT NOT NULL,
-                    reach INT,
-                    likes INT,
-                    saves INT,
-                    FOREIGN KEY (posts_id) REFERENCES posts(id) ON DELETE CASCADE
-                )
-            """)
+#         # If no posts found, return a message
+#         if not all_posts:
+#             return JSONResponse(content={"message": "No posts found."})
 
-        # Paginate through all posts from the Instagram API
-        posts_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/media?fields=id,media_type,media_url,timestamp&access_token={ZING_ACCESS_TOKEN}"
-        while posts_url:
-            posts_response = requests.get(posts_url)
+#         # Prepare the response by fetching metrics for each post
+#         post_metrics = []
+#         for post in all_posts:
+#             post_id = post.get("id")
+#             media_type = post.get("media_type")
+#             media_url = post.get("media_url")
+#             raw_timestamp = post.get("timestamp")
 
-            if posts_response.status_code != 200:
-                raise HTTPException(
-                    status_code=posts_response.status_code,
-                    detail=f"Failed to fetch posts: {posts_response.text}"
-                )
+#             # Format timestamp
+#             post_created = None
+#             if raw_timestamp:
+#                 utc_time = datetime.strptime(raw_timestamp, "%Y-%m-%dT%H:%M:%S%z")
+#                 post_created = utc_time.strftime("%Y-%m-%d")
 
-            posts_data = posts_response.json()
-            all_posts.extend(posts_data.get("data", []))
-            # Check if there's a next page
-            posts_url = posts_data.get("paging", {}).get("next")
+#             # Insert post details into `Posts` table
+#             db_post = Posts(post_id=post_id, media_type=media_type, media_url=media_url, post_created=post_created)
+#             db.add(db_post)
+#             db.commit()
 
-        # If no posts found, return a message
-        if not all_posts:
-            return JSONResponse(content={"message": "No posts found."})
+#             # Fetch likes
+#             likes_url = f"{BASE_URL}{post_id}?fields=like_count&access_token={ZING_ACCESS_TOKEN}"
+#             likes_response = requests.get(likes_url)
 
-        # Prepare the response by fetching metrics for each post
-        post_metrics = []
-        for post in all_posts:
-            post_id = post.get("id")
-            media_type = post.get("media_type")
-            media_url = post.get("media_url")
-            raw_timestamp = post.get("timestamp")
+#             if likes_response.status_code != 200:
+#                 raise HTTPException(
+#                     status_code=likes_response.status_code,
+#                     detail=f"Failed to fetch likes: {likes_response.text}"
+#                 )
+#             like_metrics = likes_response.json()
+#             like_count = like_metrics.get("like_count", 0)
 
-            # Format timestamp
-            post_created = None
-            if raw_timestamp:
-                utc_time = datetime.strptime(raw_timestamp, "%Y-%m-%dT%H:%M:%S%z")
-                post_created = utc_time.strftime("%Y-%m-%d")
+#             # Fetch insights for reach
+#             insights_url = f"{BASE_URL}{post_id}/insights?metric=reach&access_token={ZING_ACCESS_TOKEN}"
+#             insights_response = requests.get(insights_url)
 
-            # Insert post details into `Posts` table
-            cursor.execute("""
-                INSERT INTO posts (post_id, media_type, media_url, post_created)
-                VALUES (%s, %s, %s, %s)
-            """, (post_id, media_type, media_url, post_created))
-            post_db_id = cursor.lastrowid
+#             if insights_response.status_code != 200:
+#                 raise HTTPException(
+#                     status_code=insights_response.status_code,
+#                     detail=f"Failed to fetch insights: {insights_response.text}"
+#                 )
+#             post_insights = insights_response.json()
 
-            # Fetch likes
-            likes_url = f"{BASE_URL}{post_id}?fields=like_count&access_token={ZING_ACCESS_TOKEN}"
-            likes_response = requests.get(likes_url)
+#             # Fetch saves
+#             saves_url = f"{BASE_URL}{post_id}/insights?metric=saved&access_token={ZING_ACCESS_TOKEN}"
+#             saves_response = requests.get(saves_url)
 
-            if likes_response.status_code != 200:
-                raise HTTPException(
-                    status_code=likes_response.status_code,
-                    detail=f"Failed to fetch likes: {likes_response.text}"
-                )
-            like_metrics = likes_response.json()
-            like_count = like_metrics.get("like_count", 0)
+#             if saves_response.status_code != 200:
+#                 raise HTTPException(
+#                     status_code=saves_response.status_code,
+#                     detail=f"Failed to fetch saves: {saves_response.text}"
+#                 )
+#             save_insights = saves_response.json()
 
-            # Fetch insights for reach
-            insights_url = f"{BASE_URL}{post_id}/insights?metric=reach&access_token={ZING_ACCESS_TOKEN}"
-            insights_response = requests.get(insights_url)
+#             # Extract reach and saves values
+#             reach = None
+#             for insight in post_insights.get("data", []):
+#                 if insight.get("name") == "reach":
+#                     reach = insight.get("values", [{}])[0].get("value")
+#                     break
 
-            if insights_response.status_code != 200:
-                raise HTTPException(
-                    status_code=insights_response.status_code,
-                    detail=f"Failed to fetch insights: {insights_response.text}"
-                )
-            post_insights = insights_response.json()
+#             saves = None
+#             for insight in save_insights.get("data", []):
+#                 if insight.get("name") == "saved":
+#                     saves = insight.get("values", [{}])[0].get("value")
 
-            # Fetch saves
-            saves_url = f"{BASE_URL}{post_id}/insights?metric=saved&access_token={ZING_ACCESS_TOKEN}"
-            saves_response = requests.get(saves_url)
+#             # Insert insights into `PostInsights` table
+#             db_insight = PostInsights(
+#                 posts_id=db_post.id, reach=reach, likes=like_count, saves=saves
+#             )
+#             db.add(db_insight)
+#             db.commit()
+#             # Add the post details to the metrics list
+#             post_metrics.append({
+#                 "post_id": post_id,
+#                 "media_type": media_type,
+#                 "media_url": media_url,
+#                 "post_created": post_created,
+#                 "reach": reach,
+#                 "likes": like_count,
+#                 "saves": saves
+#             })
 
-            if saves_response.status_code != 200:
-                raise HTTPException(
-                    status_code=saves_response.status_code,
-                    detail=f"Failed to fetch saves: {saves_response.text}"
-                )
-            save_insights = saves_response.json()
+#         # Prepare the final response
+#         result = {
+#             "total_posts": len(post_metrics),
+#             "posts": post_metrics
+#         }
 
-            # Extract reach and saves values
-            reach = None
-            for insight in post_insights.get("data", []):
-                if insight.get("name") == "reach":
-                    reach = insight.get("values", [{}])[0].get("value")
-                    break
+#         return JSONResponse(content=f"Successfully Retrieved and Added the Data Into Database {result}")
 
-            saves = None
-            for insight in save_insights.get("data", []):
-                if insight.get("name") == "saved":
-                    saves = insight.get("values", [{}])[0].get("value")
-
-            # Insert insights into `PostInsights` table
-            cursor.execute("""
-                INSERT INTO zing.postinsights (posts_id, reach, likes, saves)
-                VALUES (%s, %s, %s, %s)
-            """, (post_db_id, reach, like_count, saves))
-            # Add the post details to the metrics list
-            post_metrics.append({
-                "post_id": post_id,
-                "media_type": media_type,
-                "media_url": media_url,
-                "post_created": post_created,
-                "reach": reach,
-                "likes": like_count,
-                "saves": saves
-            })
-
-        # Prepare the final response
-        result = {
-            "total_posts": len(post_metrics),
-            "posts": post_metrics
-        }
-
-        return JSONResponse(content=result)
-
-    except HTTPException as e:
-        traceback.print_exc()
-        return JSONResponse(status_code=e.status_code, content={"error": e.detail})
-    except Exception:
-        traceback.print_exc()
-        return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
+#     except HTTPException as e:
+#         traceback.print_exc()
+#         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
+#     except Exception:
+#         traceback.print_exc()
+#         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
