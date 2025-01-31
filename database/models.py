@@ -14,7 +14,9 @@ class SocialMedia(Base):
     reach = Column(Integer)
     accounts_engaged = Column(Integer)
     website_clicks = Column(Integer)
-    created_ts = Column(DateTime)
+    created_ts = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_ts = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+
 
     engaged_audience_ages = relationship("EngagedAudienceAge", back_populates="social_profile", cascade="all, delete-orphan")
     engaged_audience_genders = relationship("EngagedAudienceGender", back_populates="social_profile", cascade="all, delete-orphan")
@@ -29,6 +31,7 @@ class EngagedAudienceAge(Base):
     age_group = Column(String(50), nullable=False)
     count = Column(Integer, nullable=False)
     created_ts = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_ts = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
     social_profile = relationship("SocialMedia", back_populates="engaged_audience_ages")
 
@@ -41,7 +44,7 @@ class EngagedAudienceGender(Base):
     gender = Column(String(10), nullable=False)
     count = Column(Integer, nullable=False)
     created_ts = Column(DateTime, default=datetime.now(timezone.utc))
-
+    updated_ts = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
     social_profile = relationship("SocialMedia", back_populates="engaged_audience_genders")
 
@@ -54,6 +57,7 @@ class EngagedAudienceLocation(Base):
     city = Column(String(255), nullable=False)
     count = Column(Integer, nullable=False)
     created_ts = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_ts = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
 
     social_profile = relationship("SocialMedia", back_populates="engaged_audience_locations")
@@ -68,6 +72,7 @@ class Posts(Base):
     media_url = Column(Text)
     post_created = Column(DateTime)
     created_ts = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_ts = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
     social_postinsights = relationship("PostInsights", back_populates="social_posts", cascade="all, delete-orphan")
 
@@ -81,5 +86,6 @@ class PostInsights(Base):
     likes = Column(Integer)
     saves = Column(Integer)
     created_ts = Column(DateTime, default=datetime.now(timezone.utc))
+    updated_ts = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
 
     social_posts = relationship("Posts", back_populates="social_postinsights")

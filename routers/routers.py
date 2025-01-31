@@ -138,7 +138,6 @@ def fetch_insights_zing(db: Session = Depends(get_db)):
                     reach=result["reach"],
                     accounts_engaged=result["accounts_engaged"],
                     website_clicks=result["website_clicks"],
-                    created_ts=datetime.now(timezone.utc)
                 )
                 db.add(socialmedia_analytics)
                 db.commit()
@@ -153,9 +152,11 @@ def fetch_insights_zing(db: Session = Depends(get_db)):
         return JSONResponse(content=result)
 
     except HTTPException as e:
+        db.rollback()
         traceback.print_exc()
         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
     except Exception:
+        db.rollback()
         traceback.print_exc()
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
 
@@ -222,8 +223,13 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
         engaged_audience_gender_data = engaged_audience_gender_response.json()
         engaged_audience_city_data = engaged_audience_city_response.json()
 
-         # Fetch the SocialMedia ID (since only one account exists)
-        socialmedia_entry = db.query(SocialMedia).first()
+        # Retrieve the latest socialmedia record for today's date
+        socialmedia_entry = (
+            db.query(SocialMedia)
+            .filter(func.date(SocialMedia.created_ts) == today_date)
+            .order_by(SocialMedia.created_ts.desc())  # Get the latest entry
+            .first()
+        )
         if not socialmedia_entry:
             raise HTTPException(status_code=404, detail="Social media record not found.")
         
@@ -264,6 +270,8 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                                 if existing_entry:
                                     # Update the existing record by adding the difference
                                     existing_entry.count += count_difference
+                                    db.flush()
+                                    db.refresh(existing_entry)
                                 else:
                                     # If no existing entry for today, create a new one with the new count
                                     age_instance = EngagedAudienceAge(
@@ -310,6 +318,8 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                                 if existing_entry:
                                     # Update the existing record by adding the difference
                                     existing_entry.count += count_difference
+                                    db.flush()
+                                    db.refresh(existing_entry)
                                 else:
                                     # If no existing entry for today, create a new one with the new count
                                     gender_instance = EngagedAudienceGender(
@@ -356,6 +366,8 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                                 if existing_entry:
                                     # Update the existing record by adding the difference
                                     existing_entry.count += count_difference
+                                    db.flush()
+                                    db.refresh(existing_entry)
                                 else:
                                     # If no existing entry for today, create a new one with the new count
                                     city_instance = EngagedAudienceLocation(
@@ -373,7 +385,6 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                                 })
 
         db.commit()
-
         result = {
             "age_group": age_group,
             "gender_distribution": gender_distribution,
@@ -383,9 +394,11 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
         return result
 
     except HTTPException as e:
+        db.rollback()
         traceback.print_exc()
         return JSONResponse(status_code=e.status_code, content={"error": e.detail})
     except Exception:
+        db.rollback()
         traceback.print_exc()
         return JSONResponse(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, content={"error": "Something went wrong."})
 
@@ -531,8 +544,7 @@ def fetch_all_posts(db: Session = Depends(get_db)):
         
         # Prepare the final response
         result = {
-            "total_posts": len(post_metrics),
-            "posts": post_metrics
+            "total_posts": len(post_metrics)
         }
 
         return JSONResponse(content=f"Successfully Retrieved and Added the Data Into Database {result}")
