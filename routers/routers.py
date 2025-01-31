@@ -441,25 +441,17 @@ def fetch_all_posts(db: Session = Depends(get_db)):
             if raw_timestamp:
                 utc_time = datetime.strptime(raw_timestamp, "%Y-%m-%dT%H:%M:%S%z")
                 post_created = utc_time.strftime("%Y-%m-%d")
-            # Check if there is an existing post for today, if so, update or skip
-            existing_post = db.query(Posts).filter(
-                Posts.post_id == post_id,
-                func.date(Posts.created_ts) == datetime.now(timezone.utc).date()
-            ).first()
+            # Check if post already exists by post_id (ignore the created_ts for this check)
+            existing_post = db.query(Posts).filter(Posts.post_id == post_id).first()
 
-            if existing_post:
-                continue
-            else:
-                # Insert post details into `Posts` table
-                db_post = Posts(
-                    post_id=post_id,
-                    media_type=media_type,
-                    media_url=media_url,
-                    post_created=post_created,
-                    created_ts=datetime.now(timezone.utc)
-                )
+            if not existing_post:
+                # New post: Insert it into Posts table
+                db_post = Posts(post_id=post_id, media_type=media_type, media_url=media_url, post_created=post_created)
                 db.add(db_post)
                 db.commit()
+                db.refresh(db_post)  # Get the ID of the newly inserted post
+            else:
+                db_post = existing_post
 
             # Fetch likes
             likes_url = f"{BASE_URL}{post_id}?fields=like_count&access_token={ZING_ACCESS_TOKEN}"
@@ -507,29 +499,37 @@ def fetch_all_posts(db: Session = Depends(get_db)):
                 if insight.get("name") == "saved":
                     saves = insight.get("values", [{}])[0].get("value")
 
-           # Check for existing PostInsights record for today
+            # Check for existing PostInsights record for today
             existing_insight = db.query(PostInsights).filter(
                 PostInsights.posts_id == db_post.id,
                 func.date(PostInsights.created_ts) == datetime.now(timezone.utc).date()
             ).first()
 
             if existing_insight:
-                # If there's an existing insight for today, update the count
-                existing_insight.reach += (reach or 0)  # Update based on new data
-                existing_insight.likes += (like_count or 0)
-                existing_insight.saves += (saves or 0)
+                # If there's an existing insight for today, check for changes
+                if existing_insight.reach != reach or existing_insight.likes != like_count or existing_insight.saves != saves:
+                    # Add a new record with the updated metrics
+                    db_insight = PostInsights(
+                        posts_id=db_post.id,
+                        reach=reach,
+                        likes=like_count,
+                        saves=saves,
+                    )
+                    db.add(db_insight)
+                    db.commit()
+                    db.refresh(db_insight)  # Refresh to get the ID of the newly inserted record
             else:
-                # Insert insights into `PostInsights` table
+                # Insert insights into `PostInsights` table if not already present
                 db_insight = PostInsights(
                     posts_id=db_post.id,
                     reach=reach,
                     likes=like_count,
                     saves=saves,
-                    created_ts=datetime.now(timezone.utc)
                 )
                 db.add(db_insight)
+                db.commit()
+                db.refresh(db_insight)  # Refresh to get the ID of the newly inserted record
 
-            db.commit()
 
             # Add the post details to the metrics list
             post_metrics.append({
