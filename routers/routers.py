@@ -111,6 +111,28 @@ def fetch_insights_zing(db: Session = Depends(get_db)):
             "accounts_engaged": accounts_engaged,
             "website_clicks" : website_clicks
         }
+        # Fetch the sum of existing metrics
+        existing_sums = db.query(
+            func.sum(SocialMedia.followers).label("total_followers"),
+            func.sum(SocialMedia.impressions).label("total_impressions"),
+            func.sum(SocialMedia.reach).label("total_reach"),
+            func.sum(SocialMedia.accounts_engaged).label("total_accounts_engaged"),
+            func.sum(SocialMedia.website_clicks).label("total_website_clicks"),
+        ).first()
+
+        # Extract values or default to 0
+        total_followers = existing_sums.total_followers or 0
+        total_impressions = existing_sums.total_impressions or 0
+        total_reach = existing_sums.total_reach or 0
+        total_accounts_engaged = existing_sums.total_accounts_engaged or 0
+        total_website_clicks = existing_sums.total_website_clicks or 0
+
+        # Calculate the difference (newly fetched - existing sum)
+        new_followers = result["followers_count"] - total_followers
+        new_impressions = result["impressions"] - total_impressions
+        new_reach = result["reach"] - total_reach
+        new_accounts_engaged = result["accounts_engaged"] - total_accounts_engaged
+        new_website_clicks = result["website_clicks"] - total_website_clicks
 
         # Get today's date (without time) in UTC
         today_date = datetime.now(timezone.utc).date()
@@ -119,25 +141,25 @@ def fetch_insights_zing(db: Session = Depends(get_db)):
         existing_record = db.query(SocialMedia).filter(func.date(SocialMedia.created_ts) == today_date).first()
 
         if existing_record:
-            # If a record exists, update the counts based on the new fetched data
-            existing_record.followers = result["followers_count"] - db.query(func.sum(SocialMedia.followers)).scalar() or 0
-            existing_record.impressions = result["impressions"] - db.query(func.sum(SocialMedia.impressions)).scalar() or 0
-            existing_record.reach = result["reach"] - db.query(func.sum(SocialMedia.reach)).scalar() or 0
-            existing_record.accounts_engaged = result["accounts_engaged"] - db.query(func.sum(SocialMedia.accounts_engaged)).scalar() or 0
-            existing_record.website_clicks = result["website_clicks"] - db.query(func.sum(SocialMedia.website_clicks)).scalar() or 0
+            # Update the existing record with new counts
+            existing_record.followers = new_followers
+            existing_record.impressions = new_impressions
+            existing_record.reach = new_reach
+            existing_record.accounts_engaged = new_accounts_engaged
+            existing_record.website_clicks = new_website_clicks
 
             db.commit()  # Commit the changes to the database
-            db.refresh(existing_record)  # Refresh the record to get the updated data
+            db.refresh(existing_record)  # Refresh the record to get updated data
         else:
-            # If no record exists for today, insert a new one
+            # Insert a new record with the calculated differences
             try:
                 socialmedia_analytics = SocialMedia(
                     username=result["username"],
-                    followers=result["followers_count"],
-                    impressions=result["impressions"],
-                    reach=result["reach"],
-                    accounts_engaged=result["accounts_engaged"],
-                    website_clicks=result["website_clicks"],
+                    followers=new_followers,
+                    impressions=new_impressions,
+                    reach=new_reach,
+                    accounts_engaged=new_accounts_engaged,
+                    website_clicks=new_website_clicks,
                 )
                 db.add(socialmedia_analytics)
                 db.commit()
@@ -249,12 +271,15 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                         for result in breakdown["results"]:
                             age_range = result.get("dimension_values", [])
                             new_count = result.get("value")
+                            
                             if age_range:
-                                # Fetch the sum of all existing counts for this age_group
+                                age_group_name = age_range[0]  # Extract age range
+
+                                # Fetch the sum of all existing counts for this age group today
                                 existing_total = db.query(func.sum(EngagedAudienceAge.count)).filter(
                                     EngagedAudienceAge.socialmedia_id == socialmedia_id,
-                                    EngagedAudienceAge.age_group == age_range[0],
-                                    func.date(EngagedAudienceAge.created_ts) == today_date
+                                    EngagedAudienceAge.age_group == age_group_name,
+                                    func.date(EngagedAudienceAge.created_ts) == func.current_date()
                                 ).scalar() or 0  # Default to 0 if no records exist
 
                                 # Calculate the difference: new_count - existing_total
@@ -263,31 +288,33 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                                 # Fetch the existing entry for the current day
                                 existing_entry = db.query(EngagedAudienceAge).filter(
                                     EngagedAudienceAge.socialmedia_id == socialmedia_id,
-                                    EngagedAudienceAge.age_group == age_range[0],
-                                    func.date(EngagedAudienceAge.created_ts) == today_date
+                                    EngagedAudienceAge.age_group == age_group_name,
+                                    func.date(EngagedAudienceAge.created_ts) == func.current_date()
                                 ).first()
 
                                 if existing_entry:
                                     # Update the existing record by adding the difference
                                     existing_entry.count += count_difference
-                                    db.flush()
+                                    db.commit()
                                     db.refresh(existing_entry)
                                 else:
-                                    # If no existing entry for today, create a new one with the new count
+                                    # If no existing entry for today, create a new one with the calculated count
                                     age_instance = EngagedAudienceAge(
                                         socialmedia_id=socialmedia_id,
-                                        age_group=age_range[0],
-                                        count=new_count,
+                                        age_group=age_group_name,
+                                        count=count_difference,
                                         created_ts=datetime.now(timezone.utc)
                                     )
                                     db.add(age_instance)
 
                                 # Append the processed data to the age_group list
                                 age_group.append({
-                                    "age_range": age_range[0],
+                                    "age_range": age_group_name,
                                     "count": new_count
                                 })
 
+        # Commit the changes after processing all entries
+        db.commit()
         # Process gender distribution
         for item in engaged_audience_gender_data.get("data", []):
             if item.get("name") == "engaged_audience_demographics" and "total_value" in item:
@@ -297,12 +324,15 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                         for result in breakdown["results"]:
                             gender_dist = result.get("dimension_values", [])
                             new_count = result.get("value")
+
                             if gender_dist:
-                                # Fetch the sum of all existing counts for this gender
+                                gender_name = gender_dist[0]  # Extract gender value
+
+                                # Fetch the sum of all existing counts for this gender today
                                 existing_total = db.query(func.sum(EngagedAudienceGender.count)).filter(
                                     EngagedAudienceGender.socialmedia_id == socialmedia_id,
-                                    EngagedAudienceGender.gender == gender_dist[0],
-                                    func.date(EngagedAudienceGender.created_ts) == today_date
+                                    EngagedAudienceGender.gender == gender_name,
+                                    func.date(EngagedAudienceGender.created_ts) == func.current_date()
                                 ).scalar() or 0  # Default to 0 if no records exist
 
                                 # Calculate the difference: new_count - existing_total
@@ -311,32 +341,34 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                                 # Fetch the existing entry for the current day
                                 existing_entry = db.query(EngagedAudienceGender).filter(
                                     EngagedAudienceGender.socialmedia_id == socialmedia_id,
-                                    EngagedAudienceGender.gender == gender_dist[0],
-                                    func.date(EngagedAudienceGender.created_ts) == today_date
+                                    EngagedAudienceGender.gender == gender_name,
+                                    func.date(EngagedAudienceGender.created_ts) == func.current_date()
                                 ).first()
 
                                 if existing_entry:
                                     # Update the existing record by adding the difference
                                     existing_entry.count += count_difference
-                                    db.flush()
+                                    db.commit()
                                     db.refresh(existing_entry)
                                 else:
-                                    # If no existing entry for today, create a new one with the new count
+                                    # If no existing entry for today, create a new one with the calculated count
                                     gender_instance = EngagedAudienceGender(
                                         socialmedia_id=socialmedia_id,
-                                        gender=gender_dist[0],
-                                        count=new_count,
+                                        gender=gender_name,
+                                        count=count_difference,
                                         created_ts=datetime.now(timezone.utc)
                                     )
                                     db.add(gender_instance)
 
                                 # Append the processed data to the gender_distribution list
                                 gender_distribution.append({
-                                    "gender": gender_dist[0],
+                                    "gender": gender_name,
                                     "count": new_count
                                 })
 
-        # Process city distribution
+        # Commit the changes after processing all entries
+        db.commit()
+       # Process city distribution
         for item in engaged_audience_city_data.get("data", []):
             if item.get("name") == "engaged_audience_demographics" and "total_value" in item:
                 breakdowns = item["total_value"].get("breakdowns", [])
@@ -345,12 +377,15 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                         for result in breakdown["results"]:
                             city_dist = result.get("dimension_values", [])
                             new_count = result.get("value")
+
                             if city_dist:
-                                # Fetch the sum of all existing counts for this city
+                                city_name = city_dist[0]  # Extract city name
+
+                                # Fetch the sum of all existing counts for this city today
                                 existing_total = db.query(func.sum(EngagedAudienceLocation.count)).filter(
                                     EngagedAudienceLocation.socialmedia_id == socialmedia_id,
-                                    EngagedAudienceLocation.city == city_dist[0],
-                                    func.date(EngagedAudienceLocation.created_ts) == today_date
+                                    EngagedAudienceLocation.city == city_name,
+                                    func.date(EngagedAudienceLocation.created_ts) == func.current_date()
                                 ).scalar() or 0  # Default to 0 if no records exist
 
                                 # Calculate the difference: new_count - existing_total
@@ -359,38 +394,40 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
                                 # Fetch the existing entry for the current day
                                 existing_entry = db.query(EngagedAudienceLocation).filter(
                                     EngagedAudienceLocation.socialmedia_id == socialmedia_id,
-                                    EngagedAudienceLocation.city == city_dist[0],
-                                    func.date(EngagedAudienceLocation.created_ts) == today_date
+                                    EngagedAudienceLocation.city == city_name,
+                                    func.date(EngagedAudienceLocation.created_ts) == func.current_date()
                                 ).first()
 
                                 if existing_entry:
                                     # Update the existing record by adding the difference
                                     existing_entry.count += count_difference
-                                    db.flush()
+                                    db.commit()
                                     db.refresh(existing_entry)
                                 else:
-                                    # If no existing entry for today, create a new one with the new count
+                                    # If no existing entry for today, create a new one with the calculated count
                                     city_instance = EngagedAudienceLocation(
                                         socialmedia_id=socialmedia_id,
-                                        city=city_dist[0],
-                                        count=new_count,
+                                        city=city_name,
+                                        count=count_difference,
                                         created_ts=datetime.now(timezone.utc)
                                     )
                                     db.add(city_instance)
 
                                 # Append the processed data to the city_distribution list
                                 city_distribution.append({
-                                    "city": city_dist[0],
+                                    "city": city_name,
                                     "count": new_count
                                 })
 
+        # Commit the changes after processing all entries
         db.commit()
+
+        # Prepare the final result
         result = {
             "age_group": age_group,
             "gender_distribution": gender_distribution,
             "city_distribution": city_distribution
         }
-
         return result
 
     except HTTPException as e:
@@ -505,32 +542,49 @@ def fetch_all_posts(db: Session = Depends(get_db)):
                 func.date(PostInsights.created_ts) == datetime.now(timezone.utc).date()
             ).first()
 
+            # Fetch the existing sum of metrics for the given post
+            existing_sums = db.query(
+                func.sum(PostInsights.likes).label("total_likes"),
+                func.sum(PostInsights.saves).label("total_saves"),
+                func.sum(PostInsights.reach).label("total_reach"),
+            ).filter(PostInsights.posts_id == db_post.id).first()
+
+            # Extract the values or default to 0 if None
+            total_likes = existing_sums.total_likes or 0
+            total_saves = existing_sums.total_saves or 0
+            total_reach = existing_sums.total_reach or 0
+
+            # Calculate the difference (newly fetched - existing sum)
+            new_likes = like_count - total_likes
+            new_saves = saves - total_saves
+            new_reach = reach - total_reach
+
             if existing_insight:
                 # If there's an existing insight for today, check for changes
                 if existing_insight.reach != reach or existing_insight.likes != like_count or existing_insight.saves != saves:
                     # Add a new record with the updated metrics
                     db_insight = PostInsights(
                         posts_id=db_post.id,
-                        reach=reach,
-                        likes=like_count,
-                        saves=saves,
+                        reach=new_reach,  # Store only the difference
+                        likes=new_likes,
+                        saves=new_saves,
                     )
                     db.add(db_insight)
                     db.commit()
                     db.refresh(db_insight)  # Refresh to get the ID of the newly inserted record
+                else:
+                    continue
             else:
                 # Insert insights into `PostInsights` table if not already present
                 db_insight = PostInsights(
                     posts_id=db_post.id,
-                    reach=reach,
-                    likes=like_count,
-                    saves=saves,
+                    reach=new_reach,
+                    likes=new_likes,
+                    saves=new_saves,
                 )
                 db.add(db_insight)
                 db.commit()
                 db.refresh(db_insight)  # Refresh to get the ID of the newly inserted record
-
-
             # Add the post details to the metrics list
             post_metrics.append({
                 "post_id": post_id,
