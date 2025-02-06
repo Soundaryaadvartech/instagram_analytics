@@ -69,7 +69,7 @@ def fetch_insights_zing(db: Session = Depends(get_db)):
 
         # Fetch Instagram account details
         account_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}?fields=id,username,followers_count&access_token={ZING_ACCESS_TOKEN}"
-        account_response = requests.get(account_url)
+        account_response = requests.get(account_url, timeout=60)
 
         if account_response.status_code != 200:
             raise HTTPException(
@@ -80,7 +80,7 @@ def fetch_insights_zing(db: Session = Depends(get_db)):
 
         # Fetch insights
         insights_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=impressions,reach,accounts_engaged,website_clicks&period=day&metric_type=total_value&access_token={ZING_ACCESS_TOKEN}"
-        insights_response = requests.get(insights_url)
+        insights_response = requests.get(insights_url, timeout=60)
 
         if insights_response.status_code != 200:
             raise HTTPException(
@@ -217,11 +217,11 @@ def engaged_audience_demographics(db: Session = Depends(get_db)):
         today_date = datetime.now(timezone.utc).date()
             # Fetch engaged audience demographics
         engaged_audience_age_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_week&metric_type=total_value&breakdown=age&access_token={ZING_ACCESS_TOKEN}"
-        engaged_audience_age_response = requests.get(engaged_audience_age_url)
+        engaged_audience_age_response = requests.get(engaged_audience_age_url, timeout=60)
         engaged_audience_gender_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_week&metric_type=total_value&breakdown=gender&access_token={ZING_ACCESS_TOKEN}"
-        engaged_audience_gender_response = requests.get(engaged_audience_gender_url)
+        engaged_audience_gender_response = requests.get(engaged_audience_gender_url, timeout=60)
         engaged_audience_city_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/insights?metric=engaged_audience_demographics&period=lifetime&timeframe=this_week&metric_type=total_value&breakdown=city&access_token={ZING_ACCESS_TOKEN}"
-        engaged_audience_city_response = requests.get(engaged_audience_city_url)
+        engaged_audience_city_response = requests.get(engaged_audience_city_url, timeout=60)
 
         if engaged_audience_age_response.status_code != 200:
             raise HTTPException(
@@ -448,7 +448,7 @@ def fetch_all_posts(db: Session = Depends(get_db)):
         # Paginate through all posts from the Instagram API
         posts_url = f"{BASE_URL}{ZING_INSTAGRAM_ACCOUNT_ID}/media?fields=id,media_type,media_url,timestamp&access_token={ZING_ACCESS_TOKEN}"
         while posts_url:
-            posts_response = requests.get(posts_url)
+            posts_response = requests.get(posts_url,  timeout=60)
 
             if posts_response.status_code != 200:
                 raise HTTPException(
@@ -492,7 +492,7 @@ def fetch_all_posts(db: Session = Depends(get_db)):
 
             # Fetch likes
             likes_url = f"{BASE_URL}{post_id}?fields=like_count&access_token={ZING_ACCESS_TOKEN}"
-            likes_response = requests.get(likes_url)
+            likes_response = requests.get(likes_url,  timeout=60)
 
             if likes_response.status_code != 200:
                 raise HTTPException(
@@ -504,7 +504,7 @@ def fetch_all_posts(db: Session = Depends(get_db)):
 
             # Fetch insights for reach
             insights_url = f"{BASE_URL}{post_id}/insights?metric=reach&access_token={ZING_ACCESS_TOKEN}"
-            insights_response = requests.get(insights_url)
+            insights_response = requests.get(insights_url,  timeout=60)
 
             if insights_response.status_code != 200:
                 raise HTTPException(
@@ -515,7 +515,7 @@ def fetch_all_posts(db: Session = Depends(get_db)):
 
             # Fetch saves
             saves_url = f"{BASE_URL}{post_id}/insights?metric=saved&access_token={ZING_ACCESS_TOKEN}"
-            saves_response = requests.get(saves_url)
+            saves_response = requests.get(saves_url,  timeout=60)
 
             if saves_response.status_code != 200:
                 raise HTTPException(
